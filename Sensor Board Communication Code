@@ -1,0 +1,35 @@
+//reading duration and collection time info and sending water level detection
+#include <SoftwareSerial.h>
+int r_counter = 0; //counter used to ensure that sensor board is only trying to retrieve duration and collection time interval once at beginning of simulation
+int water_counter = 0; //coutner used to ensure that sensor board only sends signal for water detection to motor board once 
+const byte rxPin = 2;
+const byte txPin = 3;
+int water_detection = 0; 
+int current_water_level = 0;
+int duration;
+int collection_interval; 
+SoftwareSerial sensor_board(rxPin, txPin);
+void setup() {
+  // put your setup code here, to run once:
+  sensor_board.begin(9600);
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  if (r_counter == 0){
+    byte buffer[sizeof(int)*2];
+    if (sensor_board.available() >= sizeof(buffer)){
+      sensor_board.readBytes(buffer, sizeof(buffer));
+      memcpy(&duration, buffer, sizeof(int));
+      memcpy(&collection_interval, buffer + sizeof(int), sizeof(int));
+      r_counter = r_counter + 1; 
+    }
+  }
+  if (water_counter == 0){
+    if (current_water_level > 2) {
+      water_detection = 1; 
+      sensor_board.write((byte*)&water_detection, sizeof(water_detection));
+      water_counter = water_counter + 1;
+    }
+  }
+}
