@@ -1,0 +1,177 @@
+//median filtering with bubble sort
+//most up to dat TFT and sensor code 
+#include <NewPing.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <SD.h>
+
+#define TRIG_PIN 7
+#define ECHO_PIN 8
+#define MAX_DISTANCE 250
+#define TFT_CS 10
+#define TFT_DC 9
+#define SD_CS 4
+#define buzzer 2
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
+File dataFile;
+
+float x = 0;
+float y = 230;
+float last_x = 0;
+float last_y = 0;
+
+float previous_time = -120; //previous time stamp in miliseconds 
+float last_beep = -120;
+float compartment_time = -1120; 
+const long beep_interval = 5000;
+const long time_interval = 1000; //water level measurement time interval in miliseconds
+const long compartment_time_interval = 10000; //temporary variable --> will eventually be replaced with user inputted collection time interval
+const long simulation_duration = 360000; // simulation duration in miliseconds --> will eventually be replaced with user input sent from other board
+float intensity = 0;
+float current_time_stamp = 0;
+float previous_time_stamp = 0;
+float previous_water_level = 0; 
+float current_water_level = 0;
+float sensor_height = 0; 
+float sum_sensor_height = 0;
+float temperature_C = 23.5;
+float speed_of_sound = 20.05*sqrt(273.15 + temperature_C)/10000;
+float total_runoff = 0;
+float total_water_height = 0; 
+NewPing sonar(TRIG_PIN, ECHO_PIN, MAX_DISTANCE);
+
+void bubbleSort(float array[], int length);
+
+void setup() {
+  Serial.begin(115200);
+  //pinMode(buzzer, OUTPUT);
+  tft.begin();
+  tft.setRotation(1);
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  for (int i = 0; i < 5; i = i + 1){
+      long initial_ToF = sonar.ping_median(5);
+      float initial_height = initial_ToF*speed_of_sound/2.0;
+      sum_sensor_height = sum_sensor_height + initial_height;
+      Serial.print(millis()/1000);
+      Serial.print(", ");
+    delay(855);
+  }
+  sensor_height = sum_sensor_height/5; 
+  Serial.print(sensor_height);
+  //if (!SD.begin(SD_CS)){
+    //tft.setCursor(10,40);
+    //tft.println("SD init failed");
+    //while (1);
+  //}
+  //dataFile = SD.open("hydrograph.csv", FILE_WRITE);
+  //if (dataFile){
+    //dataFile.println("water level time step (s), water level (cm), hydrograph time range (s), runoff flow rate (cm3/s)");
+    //dataFile.close();
+  //}
+}
+
+void loop() {
+  unsigned long current_time = millis();
+  float water_levels[5];
+  if (previous_time >= (simulation_duration + 1200000)){
+    Serial.print("End of Simulation.");
+  } else {
+    if (current_time - previous_time >= time_interval){
+      if (current_time - last_beep >= beep_interval){
+        last_beep = current_time;
+        for (int i = 0; i < 300; i = i +1){
+          digitalWrite(buzzer, HIGH);
+          delayMicroseconds(500);
+          digitalWrite(buzzer, LOW);
+          delayMicroseconds(500);
+        }   
+      }
+      for (int i = 0; i < 5; i = i + 1){
+        long duration = sonar.ping();
+        float distance = duration*speed_of_sound/2.0;
+        current_water_level = sensor_height - distance; 
+        Serial.print(current_water_level);
+        Serial.print(" ");
+        water_levels[i] = current_water_level;
+        delay(60);
+      }
+      bubbleSort(water_levels, 5);
+      if (water_levels[2] < 0 || water_levels[2] > 13.5){
+
+      }else{
+        current_time_stamp = (current_time + 120)/1000;
+        current_water_level = water_levels[2];
+        Serial.print("Time: ");
+        Serial.print(current_time_stamp);
+        Serial.print("s | Median Water Levels: ");
+        Serial.print(current_water_level);
+        Serial.print(" cm | ");
+        Serial.print("Time Step: ");
+        Serial.print(previous_time_stamp);
+        Serial.print(" - ");
+        Serial.print(current_time_stamp);
+        Serial.print("s | ");
+        Serial.print("Runoff Flow Rate: ");
+        intensity = (current_water_level - previous_water_level)*2.2*18.8/(current_time_stamp - previous_time_stamp);
+        Serial.print(intensity);
+        Serial.println(" cm^3/s");
+
+        if (intensity >= 0){
+          float hydrograph_time = (current_time_stamp + previous_time_stamp)/2;
+          x = map(hydrograph_time, 0, ((simulation_duration + 120000)/1000), 10, 310);
+          y = map(intensity, 0, 90, 230, 10);
+          tft.drawPixel(x, y, ILI9341_WHITE);
+          tft.drawLine(last_x, last_y, x, y, ILI9341_WHITE);
+          last_x = x;
+          last_y = y;
+
+          //dataFile = SD.open("hydrograph.csv", FILE_WRITE);
+          //if (dataFile){
+            //dataFile.print(current_time_stamp);
+            //dataFile.print(",");
+            //dataFile.print(current_water_level);
+            //dataFile.print(",");
+            //dataFile.print(previous_time_stamp);
+            //dataFile.print(",");
+            //dataFile.print(current_time_stamp);
+            //dataFile.print(",");
+            //dataFile.println(intensity);
+            //dataFile.close();
+          //}
+        }
+
+        previous_water_level = current_water_level;
+        if (current_time - compartment_time >= compartment_time_interval){
+          total_water_height = previous_water_level + total_water_height; 
+          total_runoff = total_water_height*2.2*18.8; //in cm^3
+          compartment_time = current_time; 
+        }
+      }
+      previous_time_stamp = current_time_stamp;
+      previous_time = current_time;
+    }
+  }
+}
+
+void bubbleSort(float array[], int length){
+  float temp;
+  bool swapped;
+  for (int i = 0; i < length; i = i + 1){
+    swapped = false;
+    for (int j = 0; j < length - 1 - i; j = j + 1){
+      if (array[j] > array[j + 1]){
+        temp = array[j];
+        array[j] = array[j+1];
+        array[j+1] = temp;
+        swapped = true;
+      }
+    }
+    if (!swapped){
+      break;
+    }
+  }
+}
