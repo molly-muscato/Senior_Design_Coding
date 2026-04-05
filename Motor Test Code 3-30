@@ -1,5 +1,4 @@
-//Dr. Hofstetter recommended trying smaller delay for smoother vibration
-//DON'T PLUG IN ENA PINS 
+//Don't plug in ENA pins 
 #define STEP_PIN 9
 #define DIR_PIN 8
 
@@ -13,12 +12,18 @@ void setup() {
 
 void loop() {
   // step pulse
-  for (int x = 0; x<200; x++){
+  for (int x = 0; x<220; x++){
     digitalWrite(STEP_PIN, HIGH);
     digitalWrite(13, HIGH);   // LED ON
-    delay(1);
+    delayMicroseconds(1000);
 
     digitalWrite(STEP_PIN, LOW);
+    digitalWrite(13, LOW);    // LED OFF
+    delayMicroseconds(1000);
+  }
+  
+}
+
     digitalWrite(13, LOW);    // LED OFF
     delay(1);
   }
