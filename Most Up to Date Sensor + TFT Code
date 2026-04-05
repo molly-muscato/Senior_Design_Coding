@@ -172,7 +172,7 @@ void loop(){
       //Serial.println(sim_duration_secs);
       //Serial.print("Interval: ");
       //Serial.println(collection_time_secs);
-      //sim_duration_millis = sim_duraction_secs*1000;
+      //sim_duration_millis = sim_duration_secs*1000;
       //collection_time_millis = collection_time_secs*1000;
     //}
   //}
@@ -244,7 +244,7 @@ void loop(){
         tft.println(total_runoff);
         //if (previous_water_level > 2 && !sent_water_signal){
           //water_detection = 1;
-          //sensor_board.write((byte)*&water_detection, sizeof(water_detection));
+          //sensor_board.write((byte*)&water_detection, sizeof(water_detection));
           //sent_water_signal = true;
           //Serial.println("Water signal sent");
         //}
