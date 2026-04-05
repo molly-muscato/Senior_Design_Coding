@@ -2,39 +2,48 @@
 //sending duration and collection time info and receiving water level detection 
 #include <SoftwareSerial.h>
 const byte rxPin = 2;
-const byte txPin = 3;
+const byte txPin = 3; 
+int water_presence;
+int detect_counter = 0; 
 int tank_interval = 10;
 int sim_duration = 360;
 int sim_pin = A2;
-int col_time_pin = A3;
+int col_time_pin = A3; 
 int sim_dial_pot = 0;
 int col_time_pot = 0;
-int water_presence;
 bool sent_duration = false;
 bool water_detect = false;
-int motor_to_sensor = 0;
 SoftwareSerial motor_board(rxPin, txPin);
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);
   motor_board.begin(9600);
   delay(5000);
-  //sim_dial_pot = analogRead(sim_pin);
-  //col_time_pot = analogRead(col_time_pin);
-  //sim_duration = map(sim_dial_pot, 0, 1023, 0, 900);//0-15 min in seconds
-  //tank_interval = map(col_time_pot, 0, 1023, 0, 45);//tank interval time in seconds
- 
+  sim_dial_pot = analogRead(sim_pin); // --> might need to move into void loop with counter if we want user to be able to adjust dial once simulation has started
+  col_time_pot = analogRead(col_time_pin);
+  sim_duration = map(sim_dial_pot, 0, 1023, 0, 900);//0-15 min in seconds
+  tank_interval = map(col_time_pot, 0, 1023, 0, 45);//tank interval time in seconds
+  Serial.print(sim_dial_pot);
+  Serial.print(" ");
+  Serial.print(sim_duration);
+  Serial.print(" ");
+  Serial.print(col_time_pot);
+  Serial.print(" ");
+  Serial.print(tank_interval);
+  Serial.println(" ");
+
+  motor_board.write((byte*)&sim_duration, sizeof(sim_duration));
+  motor_board.write((byte*)&tank_interval, sizeof(tank_interval));  
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  //put your main code here, to run repeatedly:
   if (!sent_duration){
     motor_board.write((byte*)&sim_duration, sizeof(sim_duration));
     motor_board.write((byte*)&tank_interval, sizeof(tank_interval));
     Serial.println("sending");
     sent_duration = true;
   }
- 
   if (!water_detect){
     byte buffer[sizeof(int)];
     if (motor_board.available() >= sizeof(buffer)){
@@ -45,4 +54,15 @@ void loop() {
       Serial.print(water_presence);
     }
   }
+  if (water_detect == true){
+    if (motor_board.available()){
+      char cmd = motor_board.read();
+      if (cmd == 'T'){
+        // run motor code --> based on the way the arduino board communication is set up, I think the conditional statements for checking if the tank is present might need to be under all of the other if statements
+        //I think the counter for determining when it's time to remove the tank might also have to go under these three conditional statements in order to not cause issues with the boards communicating 
+      }
+    }
+
+  }
 }
+
