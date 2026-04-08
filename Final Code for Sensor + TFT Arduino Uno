@@ -7,15 +7,15 @@
 #include "RTClib.h"
 #include <SoftwareSerial.h>
 
-const byte rxPin = 2;
-const byte txPin = 3; 
+//const byte rxPin = 2;
+//const byte txPin = 3; 
 
-SoftwareSerial sensor_board(rxPin, txPin);
+//SoftwareSerial sensor_board(rxPin, txPin);
 
 //variables for sensor board communication
-bool received_duration = false;
-bool sent_water_signal = false; 
-int water_detection = 0;
+//bool received_duration = false;
+//bool sent_water_signal = false; 
+//int water_detection = 0;
 
 #define TRIG_PIN 7
 #define ECHO_PIN 8
@@ -26,7 +26,7 @@ int water_detection = 0;
 
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 File dataFile;
-RTC_DS3231 rtc; 
+//RTC_DS3231 rtc; 
 
 char file_name[13];
 
@@ -38,7 +38,7 @@ float last_y = 163;
 
 //set up for moving average filter 
 const int filter_size = 5;
-int filter_array[filter_size] = {0};
+float filter_array[filter_size] = {0};
 int index = 0;
 float moving_average_sum = 0;
 float filtered_intensity = 0; 
@@ -47,10 +47,7 @@ float getMovingAverage(float new_intensity){
   moving_average_sum = moving_average_sum - filter_array[index];
   filter_array[index] = new_intensity;
   moving_average_sum = moving_average_sum + new_intensity;
-  index = index + 1;
-  if(index >= filter_size){
-    index = 0; 
-  }
+  index = (index + 1) % filter_size;
   float moving_average = moving_average_sum / filter_size; 
   return moving_average;
 }
@@ -67,7 +64,7 @@ unsigned long current_time = 0;
 float previous_time_stamp = 0;
 float current_time_stamp = 0;
 const long sensor_time_interval = 1000; //water level measurement time interval in milliseconds
-int sim_duration_secs = 360;
+int sim_duration_secs = 60;
 long  sim_duration_millis = sim_duration_secs*1000;
 //hydrograph loop
 float hydrograph_time_1 = 0;
@@ -84,7 +81,7 @@ float hydrograph_time_step = 0;
 float intensity = 0;
 //runoff volume and tank loop 
 long last_compartment_time = 0;
-int collection_time_secs =10; 
+int collection_time_secs =20; 
 long collection_time_millis = collection_time_secs*1000; 
 float total_water_height = 0; 
 float total_runoff = 0;
@@ -99,6 +96,21 @@ void setup(){
   //sensor_board.begin(9600);
   //delay(5000);
   Serial.begin(115200); //IMPORTANT: once communication between boards has been set up, some of TFT set up code should be moved beneath function that retrieves duration and collection time info --> left it here for now so loop isn't uneccessarily running tft set up code
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+  if (!SD.begin(SD_CS)){
+    Serial.print("SD init failed");
+  } else{
+    //DateTime now = rtc.now();
+    //sprintf(file_name, "%02d%02d%02d%02d.csv", now.month(), now.day(), now.hour(), now.minute());
+    dataFile = SD.open("test5.csv", FILE_WRITE);
+    if (dataFile){
+      dataFile.println("water level time step(s), water level (cm), hydrograph time step 1 (s), hydrograph time step 2 (s), runoff flow rate (cm3/s)");
+      dataFile.flush();
+    } else {
+      Serial.println("Couldn't open SD file");
+    }
+  }
   tft.begin();
   tft.setRotation(1);
   tft.fillScreen(ILI9341_BLACK);
@@ -122,7 +134,7 @@ void setup(){
   tft.println("Time (s)");
   tft.setCursor(17, 167);
   tft.println("0");
-  tft.setCursor(300, 167);
+  tft.setCursor(292, 167);//used to be 300
   tft.println(sim_duration_secs*3);
   tft.setCursor(17, 5);
   tft.println("90");
@@ -132,6 +144,11 @@ void setup(){
   tft.setRotation(1);
   tft.drawFastHLine(32, 163, 276, ILI9341_WHITE);
   tft.drawFastVLine(32, 5, 158, ILI9341_WHITE);
+  //Wire.begin();
+  //if(!rtc.begin()){
+    //Serial.println("Couldn't find RTC");
+  //}
+
   for (int i = 0; i < 5; i = i + 1){
     long initial_ToF = sonar.ping_median(5);
     float initial_height = initial_ToF*speed_of_sound/2.0;
@@ -142,22 +159,7 @@ void setup(){
   }
   sensor_height = sum_sensor_height/5;
   Serial.print(sensor_height);
-  Serial.print(" ");
-  if(!rtc.begin()) while(1);
-  DateTime now = rtc.now();
-  sprintf(file_name, "%02d%02d%02d%02d.csv", now.month(), now.day(), now.hour(), now.minute());
-  SPI.begin();
-  if (!SD.begin(SD_CS)){
-    tft.setCursor(50,40);
-    tft.println("SD init failed");
-    Serial.print("SD init failed");
-    while (1);
-  }
-  dataFile = SD.open(file_name, FILE_WRITE);
-  if (dataFile){
-    dataFile.println("water level time step(s), water level (cm), hydrograph time step 1 (s), hydrograph time step 2 (s), runoff flow rate (cm3/s)");
-    dataFile.flush();
-  }
+  Serial.print(" "); 
 }
 
 void loop(){
@@ -177,16 +179,16 @@ void loop(){
     //}
   //}
   current_time = millis();
-  if (previous_time >= sim_duration_millis*3 && counter == 0){
+  if (current_time >= sim_duration_millis*3){
     Serial.print("End of simulation.");
     dataFile.close();
-    counter = 1; 
+    while(1);
   } else {
     if (current_time - previous_time >= sensor_time_interval){
       long duration = sonar.ping_median(5);
       float distance = duration*speed_of_sound/2.0;
       current_water_level = sensor_height - distance;
-      if (current_water_level >= 0 && current_water_level <= 13.5){
+      if (current_water_level >= 0 && current_water_level <= 13.5){ //was commented out during trial that worked but shouldn't have an impact
         current_time_stamp = current_time/1000;
         Serial.print("Time: ");
         Serial.print(current_time_stamp);
@@ -203,7 +205,7 @@ void loop(){
         hydrograph_level_2 = hydrograph_level_3;
         hydrograph_level_3 = current_water_level;
         intensity = (hydrograph_level_3 - hydrograph_level_1)*2.2*18.8/(hydrograph_time_3 - hydrograph_time_1);
-        hydrograph_time_step = (hydrograph_level_1 + hydrograph_level_3)/2;
+        hydrograph_time_step = (hydrograph_time_1 + hydrograph_time_3)/2;
         if (intensity < 0){
           intensity = 0;
         }
@@ -218,6 +220,12 @@ void loop(){
         tft.fillRect(240, 203, 60, 12, ILI9341_BLACK);
         tft.setCursor(240, 203);
         tft.println(filtered_intensity);
+        Serial.print("Hydrograph Time Step: ");
+        Serial.print(filtered_time_step_1);
+        Serial.print("s | ");
+        Serial.print("Filtered Intensity: ");
+        Serial.print(filtered_intensity);
+        Serial.println("cm3/s | ");
         last_x = x;
         last_y = y; 
         if (dataFile){
@@ -229,19 +237,31 @@ void loop(){
           dataFile.print(",");
           dataFile.println(filtered_intensity);
           dataFile.flush();
-          Serial.println("Data logged");
         } else {
-          Serial.println("Failed to print");
+          dataFile = SD.open("test5.csv", FILE_WRITE);
+          if (dataFile){
+            dataFile.print(current_time_stamp);
+            dataFile.print(",");
+            dataFile.print(current_water_level);
+            dataFile.print(",");
+            dataFile.print(filtered_time_step_1);
+            dataFile.print(",");
+            dataFile.println(filtered_intensity);
+            dataFile.flush();
+            Serial.println("Data Logged");
+          }
         }
         previous_water_level = current_water_level; 
       }
       if (current_time - last_compartment_time >= collection_time_millis){
-        total_water_height = previous_water_level + total_water_height;
-        total_runoff = total_water_height*2.2*18.8; //in cm3
-        last_compartment_time = current_time; 
-        tft.fillRect(240, 191, 80, 12, ILI9341_BLACK);
-        tft.setCursor(240, 191);
-        tft.println(total_runoff);
+        if (current_water_level > 0){
+          total_water_height = previous_water_level + total_water_height;
+          total_runoff = total_water_height*2.2*18.8; //in cm3
+          last_compartment_time = current_time; 
+          tft.fillRect(240, 191, 80, 12, ILI9341_BLACK);
+          tft.setCursor(240, 191);
+          tft.println(total_runoff);
+        }
         //if (previous_water_level > 2 && !sent_water_signal){
           //water_detection = 1;
           //sensor_board.write((byte*)&water_detection, sizeof(water_detection));
