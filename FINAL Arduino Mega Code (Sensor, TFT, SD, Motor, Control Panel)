@@ -13,6 +13,13 @@
 #define TFT_DC 9
 #define SD_CS 4
 
+//stepper motor variables 
+#define STEP_PIN 12
+#define DIR_PIN 13
+const int StepsPerRev = 200;
+bool sent_water_signal = false; 
+int tank_empty_count = 0; 
+
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 File dataFile;
 char file_name[13];
@@ -24,9 +31,9 @@ void getFileName(DateTime now, char* name){
 
 //set up for (0,0) of hydrograph plot 
 float x = 32;
-float y = 163;
+float y = 145;
 float last_x = 32;
-float last_y = 163;
+float last_y = 145;
 
 //set up for moving average filter 
 const int filter_size = 5;
@@ -57,7 +64,7 @@ float previous_time_stamp = 0;
 float current_time_stamp = 0;
 const long sensor_time_interval = 1000; //water level measurement time interval in milliseconds
 int sim_duration_secs = 60;
-long  sim_duration_millis = sim_duration_secs*1000;
+long  sim_duration_millis = sim_duration_secs*1000L;
 //hydrograph loop
 float hydrograph_time_1 = 0;
 float hydrograph_time_2 = 0;
@@ -68,13 +75,12 @@ float filtered_time_step_3 = 0;
 float hydrograph_level_1 = 0;
 float hydrograph_level_2 = 0;
 float hydrograph_level_3 = 0; 
-const long hydrograph_time_interval = 3000;
 float hydrograph_time_step = 0; 
 float intensity = 0;
 //runoff volume and tank loop 
 long last_compartment_time = 0;
-int collection_time_secs =20; 
-long collection_time_millis = collection_time_secs*1000; 
+int collection_time_secs = 10; 
+long collection_time_millis = collection_time_secs*1000L; 
 float total_water_height = 0; 
 float total_runoff = 0;
 float total_precipitation = 0;
@@ -86,16 +92,49 @@ int counter = 0;
 
 NewPing sonar(TRIG_PIN, ECHO_PIN, MAX_DISTANCE);
 
+//led lights 
+#define motor_inactive 44
+#define motor_active 42
+#define tank_empty 46
+
+//dials 
+int sim_pin = A2;
+int col_time_pin = A3; 
+int rain_pin = A1; 
+int sim_dial_pot = 0;
+int col_time_pot = 0;
+int rain_pot = 0;
+
 void setup(){
-  //115200 baud rate better for NewPing library and high volume, high speed data printing 
-  //sensor_board.begin(9600);
-  //delay(5000);
   Serial.begin(115200);
+  delay(5000);
   Serial.println("Start...");
   pinMode(53, OUTPUT);
   pinMode(53, HIGH);
   pinMode(SD_CS, OUTPUT);
   pinMode(TFT_CS, OUTPUT);
+
+  pinMode(tank_empty, OUTPUT);
+  pinMode(motor_active, OUTPUT);
+  pinMode(motor_inactive, OUTPUT);
+  sim_dial_pot = analogRead(sim_pin); // --> might need to move into void loop with counter if we want user to be able to adjust dial once simulation has started
+  col_time_pot = analogRead(col_time_pin);
+  rain_pot = analogRead(rain_pin);
+  sim_duration_secs = map(sim_dial_pot, 0, 1023, 0, 900);//0-15 min in seconds
+  collection_time_secs = map(col_time_pot, 0, 1023, 0, 45);//tank interval time in seconds
+  rain_intensity = map(rain_pot, 0, 1023, 0, 5);
+  Serial.print(sim_dial_pot);
+  Serial.print(" ");
+  Serial.print(sim_duration_secs);
+  Serial.print(" ");
+  Serial.print(col_time_pot);
+  Serial.print(" ");
+  Serial.print(collection_time_secs);
+  Serial.println(" ");
+  Serial.print(rain_pot);
+  Serial.print(" ");
+  Serial.println(rain_intensity);
+
   Wire.begin();
   delay(500);
   pinMode(SD_CS, OUTPUT);
@@ -142,9 +181,9 @@ void setup(){
   tft.setCursor(75,10);
   tft.println("Runoff Hydrograph");
   tft.setTextSize(1);
-  tft.setCursor(5, 177);
+  tft.setCursor(5, 167);
   tft.println("Cumulative Runoff Volume (cm^3): ");
-  tft.setCursor(5, 189);
+  tft.setCursor(5, 179);
   tft.println("Cumulative Precipitation (cm^3): ");
   tft.setCursor(5, 191);
   tft.println("Cumulative Infiltration (cm^3): ");
@@ -156,11 +195,11 @@ void setup(){
   tft.println("Collection Time Interval (seconds): ");
   tft.setCursor(240, 227);
   tft.println(collection_time_secs);
-  tft.setCursor(150,165);
+  tft.setCursor(150,155);
   tft.println("Time (s)");
-  tft.setCursor(17, 160);
+  tft.setCursor(17, 150);
   tft.println("0");
-  tft.setCursor(292, 160);//used to be 300
+  tft.setCursor(292, 150);//used to be 300
   tft.println(sim_duration_secs*3);
   tft.setCursor(17, 5);
   tft.println("90");
@@ -168,8 +207,8 @@ void setup(){
   tft.setCursor(75, 5);
   tft.println("Runoff Intensity (cm^3/s)");
   tft.setRotation(1);
-  tft.drawFastHLine(32, 155, 276, ILI9341_WHITE);
-  tft.drawFastVLine(32, 5, 150, ILI9341_WHITE);
+  tft.drawFastHLine(32, 145, 276, ILI9341_WHITE);
+  tft.drawFastVLine(32, 5, 140, ILI9341_WHITE);
 
   for (int i = 0; i < 5; i = i + 1){
     long initial_ToF = sonar.ping_median(5);
@@ -182,6 +221,10 @@ void setup(){
   sensor_height = sum_sensor_height/5;
   Serial.print(sensor_height);
   Serial.print(" "); 
+
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  digitalWrite(DIR_PIN, LOW);
 }
 
 void loop(){
@@ -221,7 +264,7 @@ void loop(){
         filtered_time_step_2 = filtered_time_step_3;
         filtered_time_step_3 = hydrograph_time_step; 
         x = map(filtered_time_step_1, 0, sim_duration_secs*3, 32, 308);
-        y = map(filtered_intensity, 0, 90, 155, 5);
+        y = map(filtered_intensity, 0, 90, 145, 5);
         tft.drawPixel(x, y, ILI9341_WHITE);
         tft.drawLine(last_x, last_y, x, y, ILI9341_WHITE);
         tft.fillRect(240, 203, 60, 12, ILI9341_BLACK);
@@ -267,25 +310,39 @@ void loop(){
           total_precipitation = rain_intensity*1000*current_time/sim_duration_millis; //in cm3
           total_infiltration = total_precipitation - total_runoff; 
           last_compartment_time = current_time; 
-          tft.fillRect(240, 177, 80, 12, ILI9341_BLACK);
-          tft.setCursor(240, 177);
+          tft.fillRect(240, 167, 80, 12, ILI9341_BLACK);
+          tft.setCursor(240, 167);
           tft.println(total_runoff);
-          tft.fillRect(240, 189, 80, 12, ILI9341_BLACK);
-          tft.setCursor(240, 189);
+          tft.fillRect(240, 179, 80, 12, ILI9341_BLACK);
+          tft.setCursor(240, 179);
           tft.println(total_precipitation);
           tft.fillRect(240, 191, 80, 12, ILI9341_BLACK);
           tft.setCursor(240, 191);
           tft.println(total_infiltration);
         }
-        //if (previous_water_level > 1 && !sent_water_signal){
-          //water_detection = 1;
-          //sensor_board.write((byte*)&water_detection, sizeof(water_detection));
-          //sent_water_signal = true;
-          //Serial.println("Water signal sent");
-        //}
-        //if (sent_water_signal == true){
-          //sensor_board.write('T');
-        //}
+        if (previous_water_level > 1 && !sent_water_signal){
+          sent_water_signal = true;
+        if (sent_water_signal == true && previous_water_level > -1){
+          for (int i = 0; i < StepsPerRev; i = i + 1){
+            digitalWrite(STEP_PIN, HIGH);
+            delayMicroseconds(500);
+            digitalWrite(STEP_PIN, LOW);
+            delayMicroseconds(500);
+          }
+          digitalWrite(motor_active, HIGH);
+          digitalWrite(motor_inactive, LOW);
+          count = count + 1;
+          if (count == 16){
+            digitalWrite(tank_empty, HIGH);
+          }
+          if (count == 17){
+            count = 0; 
+            digitalWrite(tank_empty, LOW);
+          }
+        } else {
+          digitalWrite(motor_inactive, LOW);
+          digitalWrite(motor_active, LOW);
+        }
       }
       previous_time_stamp = current_time_stamp;
       previous_time = current_time; 
