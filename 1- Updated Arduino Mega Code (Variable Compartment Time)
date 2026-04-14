@@ -209,7 +209,7 @@ void setup(){
   tft.setTextSize(1);
   tft.setCursor(5, 191);
   tft.println("Cumulative Runoff Volume (cm^3): ");
-  tft.SetCursor(5, 203);
+  tft.setCursor(5, 203);
   tft.println("Runoff Flow Rate (cm^3/s): ");
   tft.setCursor(5, 215);
   tft.println("Time Elapsed (seconds): ");
@@ -256,8 +256,8 @@ void loop(){
     dataFile.close();
     total_precipitation = rain_intensity*1000*sim_duration_secs/60; //in cm3
     total_infiltration = total_precipitation - total_runoff; 
-    tft.fillRect(5, 203, 300, 12);
-    tft.fillRect(5, 215, 300, 12);
+    tft.fillRect(5, 203, 300, 12, ILI9341_BLACK);
+    tft.fillRect(5, 215, 300, 12, ILI9341_BLACK);
     tft.setCursor(5, 203);
     tft.println("Cumulative Precipitation (cm^3): ");
     tft.setCursor(5, 215);
@@ -389,6 +389,7 @@ void loop(){
         }
         if (current_water_level > 1 && !sent_water_signal){
           sent_water_signal = true;
+        }
         if (sent_water_signal == true && current_water_level > 0){
           for (int i = 0; i < StepsPerRev; i = i + 1){
             digitalWrite(STEP_PIN, HIGH);
@@ -400,12 +401,12 @@ void loop(){
           hydrograph_level_3 = 0;
           digitalWrite(motor_active, HIGH);
           digitalWrite(motor_inactive, LOW);
-          count = count + 1;
-          if (count == 16){
+          tank_empty_count = tank_empty_count + 1;
+          if (tank_empty_count == 16){
             digitalWrite(tank_empty, HIGH);
           }
-          if (count == 17){
-            count = 0; 
+          if (tank_empty_count == 17){
+            tank_empty_count = 0; 
             digitalWrite(tank_empty, LOW);
           }
         } else {
