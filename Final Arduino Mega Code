@@ -1,0 +1,537 @@
+#include "RTClib.h" //real time clock module library
+#include <NewPing.h>// HC-SR04 sensor library
+#include <SPI.h> //libraries required for TFT display 
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <SD.h>
+#include <Wire.h> //real time clock module library
+
+#define TRIG_PIN 7 // trigger pin of HC-SR04 sensor is connected to digital pin 7
+#define ECHO_PIN 8 // echo pin of HC-SR04 sensor is connected to digital pin 8
+#define MAX_DISTANCE 250 // maximum distance parameter in NewPing library that terminates the sensor reading if the duration for the sensor to detect an echo reading exceeds this threshold
+#define TFT_CS 10 // Chip Select pin of TFT display attached to digital pin 10
+#define TFT_DC 9 // Data Select pin of TFT display attached to digital pin 9
+#define SD_CS 4 // SD Card Select pin of TFT display attached to digital pin 4
+
+//stepper motor variables 
+#define STEP_PIN 12 // pulse - wire of stepper driver connected to digital pin 12 (pulse + connected to power rail)
+#define DIR_PIN 13 // direction - wire of stepper driver connected to digital pin 13 (direction + connected to power rail)
+const int StepsPerRev = 200; // the number of pulses it takes for the stepper motor to turn one revolution (can adjust with microstepping settings on driver)
+bool sent_water_signal = false; // boolean variable used to determine if the initial water detection step has been completed, and the motor should turn
+int tank_empty_count = 0; // variable used to count which compartment the sensor is aligned under and when it's time to signal the user to empty the tank
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC); //TFT set-up
+File dataFile; // establishing file for micro SD data to be written to and establishing empty array to hold file_name
+char file_name[13];
+RTC_DS3231 rtc; // RTC module set up 
+
+//function for using RTC module to retrieve date and time information and create csv file name with month, day, hour, and minute label
+void getFileName(DateTime now, char* name){
+  sprintf(name, "%02d%02d%02d%02d.csv", now.month(), now.day(), now.hour(), now.minute());
+}
+
+//set up for (0,0) of hydrograph plot 
+float x = 32.0; 
+float y = 145.0;
+float last_x = 32.0; // last_x and last_y used to store previous coordinate so that line can be drawn from previous to current point on the hydrograph
+float last_y = 145.0;
+
+//set up for moving average filter 
+const int filter_size = 5; // moving average filter window size of 5 elected based on data analysis 
+float filter_array[filter_size] = {0}; //establishing empty array to store values in moving average filter window
+int index = 0; // index used in circular buffer to replace oldest runoff flow rate with newest
+float moving_average_sum = 0.0; // variable used to store sum of values in moving average fitler window
+float filtered_runoff_rate = 0.0; // final processed runoff flow rate reported in csv file and digital hydrograph
+
+//function used to calculate moving average via a circular buffer (oldest runoff flow rate in window is subtracted from the moving average sum while the newest is added and then the oldest value is replaced by the newest in the array via a moving index)
+float getMovingAverage(float new_runoff_rate){
+  moving_average_sum = moving_average_sum - filter_array[index];
+  filter_array[index] = new_runoff_rate;
+  moving_average_sum = moving_average_sum + new_runoff_rate;
+  index = (index + 1) % filter_size; //modulo function used to functionally reset index to 0 once the index has surpassed the size of the moving average filter window
+  float moving_average = moving_average_sum / filter_size; // the sum of the runoff flow rates in the window is divided by the size of the window to derive an average
+  return moving_average; // filtered runoff flow rate returned to user 
+}
+
+//assigning all global variables 
+//general ultrasonic sensor loop 
+float sensor_height = 0.0; // in cm
+float sum_sensor_height = 0.0; // calibrated sensor heights over 5 second period are summed and then divided by 5 to determine distance from collection tank base to sensor 
+float temperature = 24.0; // in degrees Celsius 
+float speed_of_sound;
+float current_water_level = 0.0; // in cm
+unsigned long previous_time = 0; //previous time in milliseconds
+unsigned long current_time = 0; // current time in milliseconds 
+float previous_time_stamp = 0.0; // previous time in seconds (for user interface printing)
+float current_time_stamp = 0.0; // current time in seconds 
+const long sensor_time_interval = 1000; //water level measurement time interval in milliseconds (sensor takes readings every second)
+int sim_duration_secs = 360; // user inputted simulation duration in seconds 
+long  sim_duration_millis = sim_duration_secs*1000L; // user inputted simulation duration in milliseconds 
+//hydrograph loop
+//variables used to store previous time stamp information so that runoff flow rate can be calculated across a 3 second interval. 
+//This interval was selected based on extensive data analysis as determining the runoff flow rate over 1 or 2 second intervals (i.e. between 3-4 seconds or 3-5 seconds) was found to be less reliable and more susceptible to flucutations caused by sensor jitter rather than meaningful changes in water level height. Calculating flow rate over a 3 second window significantly enhanced hydrograph shape as random fluctuations in water level are minimized across larger time intervals. 
+float hydrograph_time_1 = 0.0; 
+float hydrograph_time_2 = 0.0;
+float hydrograph_time_3 = 0.0;
+float hydrograph_time_4 = 0.0; 
+//the moving average filter is configured so that the filtered runoff rate at a given time stamp requires the previous 2 and future 2 runoff flow rate readings to be averaged together. Because of this, the filtered runoff flow rate returned at a given hydrograph time step actually corresponds to the time two steps prior. For this reason, the previous two time steps must be stored.
+float filtered_time_step_1 = 0.0; 
+float filtered_time_step_2 = 0.0;
+float filtered_time_step_3 = 0.0; 
+//variables used to store previous water level information so that runoff flow rate can be calculated across a 3 second interval. 
+//This interval was selected based on extensive data analysis as determining the runoff flow rate over 1 or 2 second intervals (i.e. between 3-4 seconds or 3-5 seconds) was found to be less reliable and more susceptible to flucutations caused by sensor jitter rather than meaningful changes in water level height. Calculating flow rate over a 3 second window significantly enhanced hydrograph shape as random fluctuations in water level are minimized across larger time intervals. 
+float hydrograph_level_1 = 0.0;
+float hydrograph_level_2 = 0.0;
+float hydrograph_level_3 = 0.0; 
+float hydrograph_level_4 = 0.0; 
+float hydrograph_time_step = 0.0;
+float hydrograph_time_step_length = 0.0; //variable used to calculate time interval between water level readings used to calculate runoff flow rate (normally 3 seconds but could be thrown off by motor delays or user intervention)
+//the moving average filter is configured so that the filtered runoff rate at a given time stamp requires the previous 2 and future 2 runoff flow rate readings to be averaged together. Because of this, the filtered runoff flow rate returned at a given hydrograph time step actually corresponds to the time two steps prior. For this reason, the previous two time step lengths must be stored.
+float filtered_time_step_length_1 = 0.0;
+float filtered_time_step_length_2 = 0.0;
+float filtered_time_step_length_3 = 0.0;  
+float runoff_rate = 0.0; // unfiltered runoff flow rate in cm3/s
+float runoff_volume_calc_2 = 0.0; // two methods are used to calculate cumulative runoff volume for greater accuracy
+//runoff volume and tank loop 
+long last_compartment_time = 15000; // variable used to store the previous time step at which the signal for the motor to turn was given in milliseconds 
+int collection_time_secs = 10; // user inputted collection time interval in seconds 
+long collection_time_millis = collection_time_secs*1000L; // user inputted collection time interval in milliseconds
+float total_water_height = 0.0; // variable used to keep track of cumulative water height to be converted to cumulative runoff volume
+float total_runoff = 0.0; // two methods are used to calculate cumulative runoff volume in cm3 for greater accuracy
+float total_precipitation = 0.0; // variable to determine total precipitation volume in cm3 based on user inputs of simulation duration and rainfall intensity
+float total_infiltration = 0.0; // total runoff volume subtracted from total precipitation to determine total infiltration in cm3 at end of simulation
+float rain_intensity = 4; // user inputted rainfall intensity used to determine total precipitation and plot hyetograph 
+//hyetograph
+float rainfall_mm = 0.0; // based on simulator tank area and rainfall intensity provided by user, precipitation volume is converted to rainfall depth in mm/s for hyetograph plotting
+float hyetograph_location_y = 0.0; // rainfall depth in mm
+float hyetograph_location_x1 = 0.0; // start of rainfall
+float hyetograph_location_x2 = 0.0; // end of rainfall 
+bool rainfall_start = false; // boolean variable used to keep track of whether message to start pump has already been sent to user 
+bool rainfall_end = false; // boolean variable used to keep track of whether message to stop pump has already been sent to user 
+
+NewPing sonar(TRIG_PIN, ECHO_PIN, MAX_DISTANCE); // HC-SR04 set-up
+
+//led lights 
+#define motor_inactive 44 // red LED light connected to digital pin 44
+#define motor_active 42 // green LED light connected to digital pin 42
+#define tank_empty 46 // blue LED light connected to digital pin 46 
+
+//dials 
+int sim_pin = A7; // dial for simulation duration connected to analog pin 7
+int col_time_pin = A2; // dial for collection time interval connected to analog pin 2
+int rain_pin = A3; //dial for rainfall intensity connected to analog pin 3
+int sim_dial_pot = 0; // variable for storing potentiometer reading for simulation duration dial
+int col_time_pot = 0; // variable for storing potentiometer reading for collection time interval dial
+int rain_pot = 0; // variable for storing potentiometer reading for rainfall intensity dial
+
+void setup(){
+  Serial.begin(115200); // baud rate of 115200 used due to high volume of data printed to serial monitor every second
+  delay(5000); // 5 second delay to provide time for circuit to stabilize before different components are initialized
+  Serial.println("Start...");
+  pinMode(53, OUTPUT); // for Arduino mega, when using SPI connections, pin 53 must be declared as output 
+  pinMode(53, HIGH);
+  pinMode(SD_CS, OUTPUT); // setting up SD card and TFT chip select pins as outputs
+  pinMode(TFT_CS, OUTPUT);
+
+  pinMode(tank_empty, OUTPUT); // setting up LED light pins as outputs
+  pinMode(motor_active, OUTPUT);
+  pinMode(motor_inactive, OUTPUT);
+  sim_dial_pot = analogRead(sim_pin); // voltage read from simulation duration potentiometer
+  col_time_pot = analogRead(col_time_pin); // voltage read from collection time interval potentiometer
+  rain_pot = analogRead(rain_pin); // voltage read from rainfall intensity potentiometer
+  //map function converts final value to integer during interpolation and can therefore be used to achieve desired intervals. This logic is used for all of the dials except the collection time interval which uses conditional statements to create ranges instead due to desire for higher precision.
+  sim_duration_secs = 30*map(sim_dial_pot, 0, 1023, 0, 30);// simulation duration range of 0-15 min in 30 s intervals
+  sim_duration_millis = sim_duration_secs*1000L;
+  collection_time_secs = map(col_time_pot, 0, 1023, 0, 45); //tank interval time in seconds (range of 0 - 45 seconds in 5 s intervals)
+  rain_intensity = map(rain_pot, 0, 1023, 0, 25)/5; // rainfall intensity range of 0 - 5 L/min in 0.2 L/min intervals
+  //conditional statements used to discretize collection time interval inputs into 5 s increments for greater reliability
+  if (collection_time_secs< 7.5){
+    collection_time_secs = 5;
+  } else if (collection_time_secs < 12.5){
+    collection_time_secs = 10; 
+  } else if (collection_time_secs < 17.5){
+    collection_time_secs = 15; 
+  } else if (collection_time_secs < 22.5){
+    collection_time_secs = 20; 
+  } else if (collection_time_secs < 27.5){
+    collection_time_secs = 25; 
+  } else if (collection_time_secs < 32.5){
+    collection_time_secs = 30; 
+  } else if (collection_time_secs < 37.5){
+    collection_time_secs = 35;
+  } else if (collection_time_secs < 42.5){
+    collection_time_secs = 40; 
+  } else if (collection_time_secs < 47.5){
+    collection_time_secs = 45;  
+  }
+  collection_time_millis = collection_time_secs*1000L; //converting collection time interval in seconds to milliseconds for compatibility with millis function later on
+  //printing user input values for simulation duration, collection time interval, and rainfall intensity for validation in serial monitor 
+  Serial.print(sim_dial_pot);
+  Serial.print(" ");
+  Serial.print(sim_duration_secs);
+  Serial.print(" ");
+  Serial.print(col_time_pot);
+  Serial.print(" ");
+  Serial.print(collection_time_secs);
+  Serial.println(" ");
+  Serial.print(rain_pot);
+  Serial.print(" ");
+  Serial.println(rain_intensity);
+
+  Wire.begin(); // RTC initialization
+  delay(500);
+  pinMode(SD_CS, OUTPUT); // declaring SD CS as an output and turning it high before trying to initialized other components helps to reduce risk of component interference preventing RTC from initializing (prevents SPI bus from "locking")
+  digitalWrite(SD_CS, HIGH);
+  if(!rtc.begin()){ //initalizing RTC module with error message printed to serial monitor if initialization fails 
+    Serial.println("Couldn't find RTC");
+  } else{
+    Serial.println("RTC found");
+  }
+
+  DateTime now = rtc.now(); //function for pulling date and time information from RTC module 
+  temperature = rtc.getTemperature(); // function for pulling temperature from RTC module 
+  speed_of_sound = 20.05*sqrt(273.15 + temperature)/10000; // equation used to calculate speed of sound in centimeters/microsecond from temperature in degrees Celsius
+  //conditional statement checking to make sure RTC module is providing valid date and time information that can be used to create csv file name
+  if (!now.isValid()) {
+    Serial.println("RTC time invalid!");
+  } else {
+  }
+  getFileName(now, file_name); //function processing date and time information from RTC module into csv file name
+  Serial.println(file_name); //file name printed to serial monitor for user reference
+
+  digitalWrite(SD_CS, LOW); //SD pin pulled low and TFT pin pulled high to ensure SPI bus won't lock during SD card initialization
+  digitalWrite(TFT_CS, HIGH);
+  //SD card initialization
+  if (!SD.begin(SD_CS)){
+    Serial.print("SD init failed"); // error message printed to serial monitor for troubleshooting purposes
+  } else{
+    dataFile = SD.open(file_name, FILE_WRITE); // program attempting to open SD file 
+    if (dataFile){
+      Serial.println("SD file opened"); // message signaling successful SD file set-up
+      dataFile.println("water level time step(s), water level (cm), hydrograph time step (s), runoff flow rate (cm3/s)"); // headings in csv file
+      dataFile.flush(); // flush command sends data to csv file without requiring file to be opened and closed every time 
+    } else {
+      Serial.println("Couldn't open SD file");  // error message printed to serial monitor for troubleshooting purposes
+      dataFile = SD.open(file_name, FILE_WRITE); // program tries to open file again if it can't the first time before moving to later code
+      if (dataFile){ 
+        dataFile.println("water level time step(s), water level (cm), hydrograph time step (s), runoff flow rate (cm3/s)");
+        dataFile.flush(); 
+      }
+    }
+  }
+  
+  digitalWrite(SD_CS, HIGH); //SD card pin pulled high and TFT pin pulled low to prevent SPI bus locking during TFT display initialization
+  digitalWrite(TFT_CS, LOW);
+  tft.begin(); // TFT initialization
+  tft.setRotation(1); // rotating TFT screen to landscape mode 
+  tft.fillScreen(ILI9341_BLACK); // setting up black background with white font 
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(75,10); // set cursor determines text position (x, y)
+  tft.println("Runoff Hydrograph");
+  tft.setTextSize(1);
+  tft.setCursor(5, 191);
+  tft.println("Cumulative Runoff Volume (cm^3): "); // cumulative runoff volume provided to user on TFT display
+  tft.setCursor(5, 203);
+  tft.println("Runoff Flow Rate (cm^3/s): "); // instantaneous runoff flow rate provided to user on TFT display
+  tft.setCursor(5, 215);
+  tft.println("Time Elapsed (seconds): "); // elapsed time provided to user on TFT display
+  tft.setCursor(5, 227);
+  tft.println("Collection Time Interval (seconds): "); // collection time interval provided to user on TFT display
+  tft.setCursor(240, 227);
+  tft.println(collection_time_secs);
+  tft.setCursor(150,155);
+  tft.println("Time (s)"); // x axis of hydrograph
+  tft.setCursor(17, 155);
+  tft.println("0"); // x axis starts at 0 seconds 
+  tft.setCursor(292, 155);
+  tft.println(sim_duration_secs*3); // x axis ends at 3 times the length of the rainfall duration
+  tft.setCursor(17, 5);
+  tft.println("90"); // runoff flow rate scaled to range of 0 - 90 cm3/s
+  tft.setCursor(294, 5);
+  tft.println("0");
+  tft.setCursor(294, 142);
+  tft.println("0.5"); // rainfall hyetograph scaled to range of 0 - 0.5 mm/s
+  tft.setRotation(0); // TFT rotation has to be oriented back to 0 for vertical text
+  tft.setCursor(90, 5);
+  tft.println("Runoff Flow Rate (cm^3/s)"); // y axis of hydrograph
+  tft.setCursor(125, 310);
+  tft.println("Rainfall (mm)"); // y axis of hyetograph
+  tft.setRotation(1); // flipping display orientation back to landscape
+   // axis lines of hyetograph and hydrograph
+  tft.drawFastHLine(32, 145, 258, ILI9341_WHITE);
+  tft.drawFastVLine(32, 5, 140, ILI9341_WHITE);
+  tft.drawFastVLine(290, 5, 140, ILI9341_WHITE);
+  rainfall_mm = rain_intensity*10000.0/(120.0*80.0*60.0); // variable area flow meter rainfall intensity in L/min converted to intensity in mm/s by dividing rate by surface area of simulator tank and adjusting units
+  Serial.print(rain_intensity);
+  Serial.print(" ");
+  hyetograph_location_y = 5.0 + (145.0-5.0)*(rainfall_mm-0)/(0.5-0); // rainfall depth scaled to hyetograph y axis via interpolation
+  Serial.print(rainfall_mm, 4); // rainfall depth and scaled hyetograph value printed to serial monitor for troubleshooting and validation purposes
+  Serial.print(" ");
+  Serial.print(hyetograph_location_y);
+  Serial.print(" "); 
+  hyetograph_location_x1 = 32.0 + (290.0-32.0)*(15.0 - 0)/(sim_duration_secs*3 - 0); // linear interpolation used to scale start of rainfall duration to hyetograph x axis
+  hyetograph_location_x2 = 32.0 + (290.0-32.0)*(sim_duration_secs + 15.0 - 0)/(sim_duration_secs*3 - 0); // linear interpolation used to scale end of rainfall duration to hyetograph x axis
+  Serial.print(sim_duration_secs);
+  //sensor auto-height calibration
+  for (int i = 0; i < 5; i = i + 1){ //5 readings taken every second over 5 seconds
+    long initial_ToF = sonar.ping_median(5); // sonar.ping_median(5) takes 5 readings 29 milliseconds apart and then finds the median --> first layer of data processing/filtering --> weeds out erratic readings while staying focused around given timestamp
+    float initial_height = initial_ToF*speed_of_sound/2.0; // HC-SR04 measures the time of flight or time it takes for a sonar pulse to hit a surface and for the reflected echo pulse to be detected by the sensor --> therefore, to determine distance, the duration recorded must be multiplied by the speed of sound and then halved
+    sum_sensor_height = sum_sensor_height + initial_height; // adding the median sensor distance reading taken each second to later be averaged 
+    Serial.print(millis()/1000); // provides rough estimate of time elapsed in serial monitor for troubleshooting 
+    Serial.print(", ");
+    delay(855); // 855 millisecond delay used so that roughly 1 reading is taken every second 
+  }
+  sensor_height = sum_sensor_height/5.0; // sum of 5 median distance readings is divided by 5 to find average --> additional layer of data processing/filtering --> very critical that sensor height is properly calibrated so later water level measurements are accurate
+  Serial.print(sensor_height); // sensor height printed to serial monitor for troubleshooting/validation --> should be approximately 19 cm with current set up
+  Serial.print(" "); 
+
+  pinMode(STEP_PIN, OUTPUT); // initializing pulse and direction pins for stepper motor 
+  pinMode(DIR_PIN, OUTPUT);
+  digitalWrite(DIR_PIN, LOW); // orienting motor for correct direction 
+
+  digitalWrite(motor_active, LOW); // because no water level has yet to be detected in the tank, the motor inactive LED is turned on while the motor active LED is turned off 
+  digitalWrite(motor_inactive, HIGH);
+}
+
+void loop(){
+  current_time = millis(); // millis used to keep track of timestamps and ensure that sensor is taking readings and compartments are moving at fixed intervals --> much more reliable than just using delay
+  if (current_time >= sim_duration_millis*3){ // once the elapsed time exceeds three times the length of the rainfall duration inputted by the user, the ending loop is triggered which terminates sensor readings and motor motion and calculates final values
+    Serial.print("End of simulation."); // end signal printed to serial monitor for validation purposes 
+    dataFile.close();
+    total_precipitation = rain_intensity*1000.0*sim_duration_secs/60.0; // total precipitation calculated by multiplying the rainfall intensity in L/min by the rainfall duration in seconds and then adjusting for units
+    total_infiltration = total_precipitation - total_runoff; // total infiltration calculated by subtracting cumulative runoff volume (method 1) from total precipitation volume 
+    tft.fillRect(5, 203, 300, 12, ILI9341_BLACK);
+    tft.fillRect(5, 215, 300, 12, ILI9341_BLACK);
+    tft.setCursor(5, 203);
+    tft.println("Cumulative Precipitation (cm^3): "); // cumulative precipitation volume provided to user on TFT display 
+    tft.setCursor(5, 215);
+    tft.println("Cumulative Infiltration (cm^3): "); // cumulative infiltration volume provided to user on TFT display 
+    tft.fillRect(240, 203, 80, 12, ILI9341_BLACK);
+    tft.setCursor(240, 203);
+    tft.println(total_precipitation);
+    tft.fillRect(240, 215, 80, 12, ILI9341_BLACK);
+    tft.setCursor(240, 215);
+    tft.println(total_infiltration);
+    if (dataFile){ // opening SD card csv file 
+          dataFile.print("Total Runoff Volume (cm3)"); // at the end of the simulation, the total runoff, precipitation, and infiltration volume is recorded in the csv file 
+          dataFile.print(",");
+          dataFile.print(total_runoff);
+          dataFile.print(",");
+          dataFile.print("Total Precipitation Volume (cm3)");
+          dataFile.print(",");
+          dataFile.print(total_precipitation);
+          dataFile.print(",");
+          dataFile.print("Total Infiltration Volume (cm3)");
+          dataFile.print(",");
+          dataFile.print(total_infiltration);
+          dataFile.flush();
+        } else { // if the SD card fails to open, the program attempts to open it one more time 
+          dataFile = SD.open(file_name, FILE_WRITE);
+          if (dataFile){
+            dataFile.print("Total Runoff Volume (cm3)"); 
+            dataFile.print(",");
+            dataFile.print(total_runoff);
+            dataFile.print(",");
+            dataFile.print("Total Precipitation Volume (cm3)");
+            dataFile.print(",");
+            dataFile.print(total_precipitation);
+            dataFile.print(",");
+            dataFile.print("Total Infiltration Volume (cm3)");
+            dataFile.print(",");
+            dataFile.print(total_infiltration);
+            dataFile.flush();
+            Serial.println("Data Logged");
+          }
+        }
+    while(1); // while statement used to stop program from continuously running void loop after simulation has ended 
+  } else { // if elapsed time does not exceed the ending threshold, main loop is entered 
+    if (current_time - previous_time >= sensor_time_interval && current_time >= 15000){ // conditional statement used to ensure that reading is only taken once 1 second has elapsed between previous time stamp and current time stamp, current_time >= 15000 used to essentially provide a buffer that forces sensor readings to begin on even time step rather than immediately after all of the initialization in the set-up loop has been completed 
+      long duration = sonar.ping_median(5); // median filtering used once again to find median of 5 sensor readings take 29 ms apart 
+      float distance = duration*speed_of_sound/2.0; // sensor duration reading converted to distance between sensor and water surface 
+      current_water_level = sensor_height - distance; // distance between water surface and sensor subtracted from calibrated sensor height to determine water level in cm
+      if (!rainfall_start) { //after 15 seconds, the sensor has been properly calibrated, all components have been initialized, and the user should power the pump on; rainfall_start boolean variable ensures this loop is only run once for sake of processing time 
+        tft.setTextColor(ILI9341_GREEN);
+        tft.setCursor(150, 175);
+        tft.println("START PUMP"); // message on TFT display tells user to start the pump 
+        tft.setTextColor(ILI9341_WHITE);
+        rainfall_start = true; // rainfall_start set to true so loop won't run again 
+        tft.drawFastVLine(hyetograph_location_x1, 5, hyetograph_location_y - 5, ILI9341_WHITE); // vertical line drawn to mark start of hyetograph 
+      }
+      if (current_time < (sim_duration_millis + 15000)){ // hyetograph should only be plotted if the current time is less than the user specified rainfall duration
+        float hyetograph_location_x = 32.0 + (290.0-32.0)*(current_time/1000 - 0)/(sim_duration_secs*3 - 0); // interpolation used to scale current time stamp to hyetograph x axis 
+        tft.drawFastHLine(hyetograph_location_x1, hyetograph_location_y, hyetograph_location_x - hyetograph_location_x1, ILI9341_WHITE); // horizontal line drawn to create real time hyetograph
+      } else if (current_time >= sim_duration_millis && !rainfall_end){ // conditional statements used to ensure hyetograph finishes plotting once current time exceeds rainfall duration and that stop message is only sent once
+        tft.drawFastVLine(hyetograph_location_x2, 5, hyetograph_location_y - 5, ILI9341_WHITE); // vertical line drawn mark end of hyetograph
+        tft.drawFastHLine(hyetograph_location_x1, hyetograph_location_y, hyetograph_location_x2 - hyetograph_location_x1, ILI9341_WHITE); // horizontal line drawn to create real time hyetograph
+        tft.setTextColor(ILI9341_RED);
+        tft.fillRect(150, 175, 100, 12, ILI9341_BLACK);
+        tft.setCursor(150, 175);
+        tft.println("STOP PUMP"); // message on TFT display tells user to stop pump 
+        tft.setTextColor(ILI9341_WHITE);
+        rainfall_end = true; // rainfall_end set to true so loop won't run again 
+      }
+      if (current_water_level < -1){ // if the current water level is negative, this signifies that the distance between the sensor and surface is greater than the distance between the sensor and bottom of the collection tank which could only occur if the tank has been removed 
+        current_time_stamp = current_time/1000.0; // time stamp in milliseconds converted to seconds for printing to TFT display
+        last_compartment_time = current_time; // if the tank has been removed, the last compartment time is continuously set to the current time, so that the collection time that should pass before the compartments moves again is measured from the time stamp that the tank is placed back on the track rather than the last recorded time stamp at which the compartment moved
+        hydrograph_level_1 = 0.0; // if the tank has been removed, the stored water level variables are all set to 0 so that once a new water level reading is taken, the runoff flow rate is measured from the correct 0 reference point rather than the previously stored water level readings in the last compartment before the tank was removed
+        hydrograph_level_2 = 0.0; 
+        hydrograph_level_3 = 0.0; 
+        hydrograph_level_4 = 0.0;
+        hydrograph_time_1 = current_time_stamp; // similarly, if the tank has been removed, the stored time stamp variable are all set to the current time stamp so that once a new water level reading is taken, the runoff flow rate is calculated based on the elapsed time between when the tank was placed on the track and when the new water level was recorded rather than the previously stored time stamps from before the tank was removed
+        hydrograph_time_2 = current_time_stamp;
+        hydrograph_time_3 = current_time_stamp; 
+        hydrograph_time_4 = current_time_stamp; 
+        digitalWrite(motor_active, LOW); // if the tank has been removed, the motor should not activate, and thus the motor active LED is turned off while the motor inactive LED is turned on 
+        digitalWrite(motor_inactive, HIGH);
+      } else { // if the current water level is positive, then the tank should be on the track, and thus, water levels should be recorded and the system should operate at full function
+        if (current_water_level < 0){ // due to sensor jitter, at very low water levels, occasionally, the sensor will read a slightly negative water level (ex. -0.1 cm), and thus, this conditional statement adjusts these negative values to 0
+          current_water_level = 0; 
+        }
+        current_time_stamp = current_time/1000.0;
+        // time and water level reading data printed to serial monitor for troubleshooting 
+        Serial.print("Time: ");
+        Serial.print(current_time_stamp);
+        Serial.print("s | Median Water Levels: ");
+        Serial.print(current_water_level);
+        Serial.print(" cm | ");
+        tft.fillRect(240, 215, 60, 12, ILI9341_BLACK);
+        tft.setCursor(240, 215);
+        tft.println(current_time_stamp); // elapsed time printed to TFT display 
+        //variables used to store previous time stamp information so that runoff flow rate can be calculated across a 3 second interval. 
+        //This interval was selected based on extensive data analysis as determining the runoff flow rate over 1 or 2 second intervals (i.e. between 3-4 seconds or 3-5 seconds) was found to be less reliable and more susceptible to flucutations caused by sensor jitter rather than meaningful changes in water level height. Calculating flow rate over a 3 second window significantly enhanced hydrograph shape as random fluctuations in water level are minimized across larger time intervals. 
+        hydrograph_time_1 = hydrograph_time_2;
+        hydrograph_time_2 = hydrograph_time_3;
+        hydrograph_time_3 = hydrograph_time_4;
+        hydrograph_time_4 = current_time_stamp; 
+        //variables used to store previous water level information so that runoff flow rate can be calculated across a 3 second interval. 
+        //This interval was selected based on extensive data analysis as determining the runoff flow rate over 1 or 2 second intervals (i.e. between 3-4 seconds or 3-5 seconds) was found to be less reliable and more susceptible to flucutations caused by sensor jitter rather than meaningful changes in water level height. Calculating flow rate over a 3 second window significantly enhanced hydrograph shape as random fluctuations in water level are minimized across larger time intervals. 
+        hydrograph_level_1 = hydrograph_level_2;
+        hydrograph_level_2 = hydrograph_level_3;
+        hydrograph_level_3 = hydrograph_level_4;
+        hydrograph_level_4 = current_water_level;
+        runoff_rate = (hydrograph_level_4 - hydrograph_level_1)*2.0*19.0/(hydrograph_time_4 - hydrograph_time_1); // runoff flow rate is calculated based on 3 second interval every second --> difference in water level depth divided by time elapsed (usually 3 seconds) and then multiplied by surface area of compartments in cm2
+        hydrograph_time_step = (hydrograph_time_1 + hydrograph_time_4)/2.0; // the time step the calculated runoff rate occurs at is estimated at the average of the two time steps used to calculate the runoff rate
+        hydrograph_time_step_length = hydrograph_time_4 - hydrograph_time_1; // similarly, the length between hydrograph time steps is calculated by subtracting the time step of the later and earlier readings used to find the runoff rate (typically 3 seconds)
+        if (runoff_rate < 0){ // if for whatever reason, a negative runoff rate is returned usually as the result of sensor jitter making a later water level reading appear lower than a previous one, the runoff rate is adjusted to 0
+          runoff_rate = 0.0;
+        }
+        filtered_runoff_rate = getMovingAverage(runoff_rate); // moving average function called to determine filtered runoff flow rate 
+        //the moving average filter is configured so that the filtered runoff rate at a given time stamp requires the previous 2 and future 2 runoff flow rate readings to be averaged together. Because of this, the filtered runoff flow rate returned at a given hydrograph time step actually corresponds to the time two steps prior. For this reason, the previous two time steps must be stored.
+        filtered_time_step_1 = filtered_time_step_2;
+        filtered_time_step_2 = filtered_time_step_3;
+        filtered_time_step_3 = hydrograph_time_step; 
+        //the moving average filter is configured so that the filtered runoff rate at a given time stamp requires the previous 2 and future 2 runoff flow rate readings to be averaged together. Because of this, the filtered runoff flow rate returned at a given hydrograph time step actually corresponds to the time two steps prior. For this reason, the previous two time step lengths must be stored.
+        filtered_time_step_length_1 = filtered_time_step_length_2; 
+        filtered_time_step_length_2 = filtered_time_step_length_3;
+        filtered_time_step_length_3 = hydrograph_time_step_length; 
+
+        x = 32.0 + (filtered_time_step_1/(sim_duration_secs*3.0))*(264.0-32.0); // interpolation used to scale time stamp to hydrograph x axis 
+        y = 145.0 - (filtered_runoff_rate/90.0)*(145.0-5.0); // interpolation used to scale runoff flow rate to hydrograph y axis 
+        if (int(x) != int(last_x)){ // because the total simulation duration typically exceeds the number of pixels in the TFT display, the float values calculated for x and y are rounded to integer pixel values; this conditional statement only plots a new coordinate of the hydrograph once the x value rounds to a new integer to avoid points plotting on top of each other
+          tft.drawPixel(x, y, ILI9341_WHITE); // hydrograph coordinate drawn 
+          tft.drawLine(last_x, last_y, x, y, ILI9341_WHITE); // line drawn from previous hydrograph coordinate to current coordinate 
+          last_x = x; // current x and y coordinates re-assigned to become previous x and y coordinates for next round of hydrograph plotting 
+          last_y = y; 
+        }
+        tft.fillRect(240, 203, 60, 12, ILI9341_BLACK);
+        tft.setCursor(240, 203);
+        tft.println(filtered_runoff_rate); // filtered runoff flow rate printed to TFT display 
+        Serial.print("Hydrograph Time Step: ");
+        Serial.print(filtered_time_step_1); // corresponding hydrograph time step, runoff flow rate, and hydrograph time step length printed to serial monitor for validation purposes
+        Serial.print("s | ");
+        Serial.print("Filtered Runoff Rate: "); 
+        Serial.print(filtered_runoff_rate);
+        Serial.print("cm3/s | ");
+        Serial.print("Hydrograph Time Step Length: ");
+        Serial.print(filtered_time_step_length_1);
+        Serial.println(" s ");
+        runoff_volume_calc_2 = runoff_volume_calc_2 + filtered_runoff_rate*sensor_time_interval/1000.0; // second method of calculating runoff volume --> runoff flow rates are calculated on a second by second basis --> this calculation multiplies the filtered runoff flow rate in cm3/s by the 1 second interval between water level readings to determine the volume of water collected in that period --> this volume is then added to a running sum of runoff volume
+        if (dataFile){ // opening SD card csv file 
+          dataFile.print(current_time_stamp); // every second, the current time stamp, water level reading, hydrograph time step, and filtered runoff flow rate is recorded in the csv file 
+          dataFile.print(",");
+          dataFile.print(current_water_level);
+          dataFile.print(",");
+          dataFile.print(filtered_time_step_1);
+          dataFile.print(",");
+          dataFile.println(filtered_runoff_rate);
+          dataFile.flush();
+        } else { // if the SD card fails to open, the program attempts to open it one more time 
+          dataFile = SD.open(file_name, FILE_WRITE);
+          if (dataFile){
+            dataFile.print(current_time_stamp);
+            dataFile.print(",");
+            dataFile.print(current_water_level);
+            dataFile.print(",");
+            dataFile.print(filtered_time_step_1);
+            dataFile.print(",");
+            dataFile.println(filtered_runoff_rate);
+            dataFile.flush();
+            Serial.println("Data Logged");
+          }
+        }
+      }
+      col_time_pot = analogRead(col_time_pin); // the program reads the collection time potentiometer voltage to check whether the user has adjusted the collection time interval
+      collection_time_secs = map(col_time_pot, 0, 1023, 0, 45); // the voltage reading is scaled to the corresponding collection time interval 
+      //conditional statements used to discretize collection time interval inputs into 5 s increments for greater reliability
+      if (collection_time_secs< 7.5){ 
+        collection_time_secs = 5;
+      } else if (collection_time_secs < 12.5){
+        collection_time_secs = 10; 
+      } else if (collection_time_secs < 17.5){
+        collection_time_secs = 15; 
+      } else if (collection_time_secs < 22.5){
+        collection_time_secs = 20; 
+      } else if (collection_time_secs < 27.5){
+        collection_time_secs = 25; 
+      } else if (collection_time_secs < 32.5){
+        collection_time_secs = 30; 
+      } else if (collection_time_secs < 37.5){
+        collection_time_secs = 35;
+      } else if (collection_time_secs < 42.5){
+        collection_time_secs = 40; 
+      } else if (collection_time_secs < 47.5){
+        collection_time_secs = 45;  
+      }
+      collection_time_millis = collection_time_secs*1000L; // converting collection time in seconds to milliseconds 
+      if (current_time - last_compartment_time >= collection_time_millis){ // conditional statement checks whether the collection time interval has passed between the last time the motor signal was called and the current time stamp
+        if (current_water_level > 1 && !sent_water_signal){ // initial water level detection --> once more than 1 cm of water is detected in the first compartment, the sent_water_signal is set to true so that the motor signal can be sent
+          sent_water_signal = true;
+        }
+        if (sent_water_signal == true && current_water_level > 0){ // conditional statement ensures collection tank is on the track and water has been detected in the compartments
+          total_water_height = current_water_level + total_water_height; // before tank moves to next compartment, the final water level reading in the current compartment is added to a running sum of the total water level that has accumulated throughout the simulation
+          total_runoff = total_water_height*2.0*19.0; // the cumulative runoff volume in cm3 is then calculated by multiplying the cumulative water depth by the surface area of the compartments in cm2
+          last_compartment_time = current_time; // the current time is set to the previous compartment time so that this becomes the new reference point from which the collection time interval is measured from 
+          digitalWrite(motor_active, HIGH); // the motor will now be activated so the motor active LED light is turned on while the motor inactive LED light is turned off 
+          digitalWrite(motor_inactive, LOW);
+          tft.fillRect(240, 191, 80, 12, ILI9341_BLACK);
+          tft.setCursor(240, 191);
+          tft.println(total_runoff); // cumulative runoff volume printed to TFT display
+          //for (int i = 0; i < StepsPerRev; i = i + 1){ // motor signal turns motor one revolution 
+            //digitalWrite(STEP_PIN, HIGH);
+            //delayMicroseconds(3000); // 3000 microsecond delay chosen based on testing to determine the max speed that could be achieved without skipping steps 
+            //digitalWrite(STEP_PIN, LOW);
+            //delayMicroseconds(3000);
+          //}
+          // because the tank is moving from one compartment to the next, the stored water level variables must be adjusted to align with the 0 reference water level of new compartment (ex. if the previous three stored water levels were 10, 11, and 12 cm, it would not be accurate to use these when calculating runoff flow rate between the old and new compartment which might have initial readings of 1 or 2 cm)
+          hydrograph_level_2 = hydrograph_level_2 - hydrograph_level_4; // the second oldest and newest water level readings are subtracted so that this change in water level can be added to the new water level readings in the new empty compartment for runoff flow rate calculation
+          hydrograph_level_3 = hydrograph_level_3 - hydrograph_level_4; // the third oldest and newest water level readings are subtracted so that this change in water level can be added to the newe water level readings in the new empty compartment for runoff flow rate calculation
+          hydrograph_level_4 = 0; // the last water level recorded in the previous compartment is set to 0 cm so that new water level readings can be properly compared and runoff flow rate properly calculated
+          tank_empty_count = tank_empty_count + 1; // the tank empty counter is used to keep track of which compartment the sensor is aligned under with the count restarting once the 17th compartment has been reached
+          if (tank_empty_count == 17){ // checks for when the 17th compartment is aligned under the sensor 
+            tank_empty_count = 0; // compartment count set back to 0 for next round of tank motion after tank has been emptied 
+            digitalWrite(tank_empty, HIGH); // tank empty LED light turned on to alert user they will need to empty tank after collection interval
+          } else {
+            digitalWrite(tank_empty, LOW); // if the tank has not reached the last compartment, the tank empty LED light is set to off
+          }
+        } else { // if water has not yet been detected in the compartments or the collection tank is not on the track, the motor will not move 
+          digitalWrite(motor_inactive, HIGH); // motor is not active so motor inactive LED light is turned on and motor active LED light is turned off 
+          digitalWrite(motor_active, LOW);
+        }
+      }
+      previous_time_stamp = current_time_stamp; // the current time stamp is assigned as the previous time stamp so that conditional statement at start of loop will check if 1 second has passed between this time step before taking any readings
+      previous_time = current_time; 
+      
+    }
+  }
+}
